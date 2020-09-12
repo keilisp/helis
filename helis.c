@@ -96,7 +96,7 @@
        return '\x1b';
 
      if (seq[0] == '[') {
-       if (seq[1] >= '0' && seq[1] <= 9) {
+       if (seq[1] >= '0' && seq[1] <= '9') {
          if (read(STDIN_FILENO, &seq[2], 1) != 1)
            return '\x1b';
          if (seq[2] == '~') {
@@ -319,8 +319,7 @@
      break;
      // Handle Home and End
    case HOME_KEY:
-     editorMoveCursor(ARROW_DOWN);
-     /* E.cx = 0; */
+     E.cx = 0;
      break;
    case END_KEY:
      E.cx = E.screencols - 1;
