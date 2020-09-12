@@ -6,12 +6,14 @@
 #include <asm-generic/ioctls.h>
 #include <ctype.h>
 #include <errno.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/types.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Defines */
@@ -43,16 +45,18 @@ typedef struct erow {
 /* Data */
 // Editor config
 struct editorConfig {
-  int cx, cy;     // Cursor coords
-  int rx;         // Render coord
-  int rowoff;     // Row offset
-  int coloff;     // Column offset
-  int screenrows; // Screen row count
-  int screencols; // Screen columns count
-  int numrows;    // File rows count
-  erow *row;      // Row sctruct
-  // Terminal attributes
-  struct termios orig_termios;
+  int cx, cy;                  // Cursor coords
+  int rx;                      // Render coord
+  int rowoff;                  // Row offset
+  int coloff;                  // Column offset
+  int screenrows;              // Screen row count
+  int screencols;              // Screen columns count
+  int numrows;                 // File rows count
+  erow *row;                   // Row sctruct
+  char *filename;              // File Name
+  char statusmsg[80];          // Status message
+  time_t statusmsg_time;       // Timestamp for status message
+  struct termios orig_termios; // Terminal attributes
 };
 
 struct editorConfig E;
@@ -279,6 +283,10 @@ int getWindowSize(int *rows, int *cols) {
 
 // Open file in the editor
 void editorOpen(char *filename) {
+  free(E.filename);
+  // Set File Nam e
+  E.filename = strdup(filename);
+
   // Open file stream
   FILE *fp = fopen(filename, "r");
   if (!fp)
@@ -386,9 +394,47 @@ void editorDrawRows(struct abuf *ab) {
     }
     // Clear the line when redrawing
     abAppend(ab, "\x1b[K", 3);
-    if (r < E.screenrows - 1)
-      abAppend(ab, "\r\n", 2);
+    abAppend(ab, "\r\n", 2);
   }
+}
+
+// Draw status bar
+void editorDrawStatusBar(struct abuf *ab) {
+  // Invert colors and make text bold for status bar
+  abAppend(ab, "\x1b[1;7m", 6);
+  char status[80], rstatus[80];
+  // File Name and Lines Count on the left side
+  int len = snprintf(status, sizeof(status), "%.20s - %d lines",
+                     E.filename ? E.filename : "[ No Name ]", E.numrows);
+  // Line:LinesCount on the right side
+  int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cy + 1, E.numrows);
+  if (len > E.screencols)
+    len = E.screencols;
+  abAppend(ab, status, len);
+  while (len < E.screencols) {
+    if (E.screencols - len == rlen) {
+      abAppend(ab, rstatus, rlen);
+      break;
+    } else {
+      abAppend(ab, " ", 1);
+      len++;
+    }
+  }
+  // Switch back to normal colors
+  abAppend(ab, "\x1b[m", 3);
+  abAppend(ab, "\r\n", 2);
+}
+
+// Draw message bar
+void editorDrawMessageBar(struct abuf *ab) {
+  // Clear the message bar
+  abAppend(ab, "\x1b[K", 3);
+  int msglen = strlen(E.statusmsg);
+  if (msglen > E.screencols)
+    msglen = E.screencols;
+  // Display the message if message is less than 5 seconds old
+  if (msglen && time(NULL) - E.statusmsg_time < 5)
+    abAppend(ab, E.statusmsg, msglen);
 }
 
 // Refreshing Screen
@@ -403,6 +449,8 @@ void editorRefreshScreen() {
   abAppend(&ab, "\x1b[1;1H", 6);
 
   editorDrawRows(&ab);
+  editorDrawStatusBar(&ab);
+  editorDrawMessageBar(&ab);
 
   // Move cursor to E.rx and E.cy
   char buf[32];
@@ -416,6 +464,15 @@ void editorRefreshScreen() {
   // Write the buffer's contents
   write(STDOUT_FILENO, ab.b, ab.len);
   abFree(&ab);
+}
+
+// Set Status Message
+void editorSetStatusMessage(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(E.statusmsg, sizeof(E.statusmsg), fmt, ap);
+  va_end(ap);
+  E.statusmsg_time = time(NULL);
 }
 
 /* Input */
@@ -475,12 +532,20 @@ void editorProcessKeypress() {
     E.cx = 0;
     break;
   case END_KEY:
-    E.cx = E.screencols - 1;
+    if (E.cy < E.numrows)
+      E.cx = E.row[E.cy].size;
     break;
 
   // Handle PageUP and PageDown
   case PAGE_UP:
   case PAGE_DOWN: {
+    if (c == PAGE_UP) {
+      E.cy = E.rowoff;
+    } else {
+      E.cy = E.rowoff + E.screenrows - 1;
+      if (E.cy > E.numrows)
+        E.cy = E.numrows;
+    }
     int times = E.screenrows;
     while (times--)
       editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
@@ -506,9 +571,13 @@ void initEditor() {
   E.numrows = 0;
   E.coloff = 0;
   E.row = NULL;
+  E.filename = NULL;
+  E.statusmsg[0] = '\0';
+  E.statusmsg_time = 0;
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1)
     die("getWindowSize");
+  E.screenrows -= 2;
 }
 
 // Main
@@ -518,6 +587,8 @@ int main(int argc, char *argv[]) {
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
+
+  editorSetStatusMessage("HELP: Ctrl-Q = quit");
 
   while (1) {
     editorRefreshScreen();
