@@ -21,6 +21,7 @@
 #define CTRL_KEY(k) ((k)&0x1f)
 #define HELIS_VERSION "0.0.0.0.1"
 #define HELIS_TAB_STOP 4
+#define HELIS_QUIT_TIMES 1
 
 // Keys bindings
 enum editorKey {
@@ -55,6 +56,7 @@ struct editorConfig {
   int screencols;              // Screen columns count
   int numrows;                 // File rows count
   erow *row;                   // Row sctruct
+  int dirty;                   // Predicate of dirtiness
   char *filename;              // File Name
   char statusmsg[80];          // Status message
   time_t statusmsg_time;       // Timestamp for status message
@@ -125,6 +127,24 @@ void editorAppendRow(char *s, size_t len) {
   editorUpdateRow(&E.row[at]);
 
   E.numrows++;
+  // Update dirtiness
+  E.dirty++;
+}
+
+// Free memory of erow
+void editorFreeRow(erow *row) {
+  free(row->render);
+  free(row->chars);
+}
+
+// Delete row
+void editorDelRow(int at) {
+  if (at < 0 || at >= E.numrows)
+    return;
+  editorFreeRow(&E.row[at]);
+  memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
+  E.numrows--;
+  E.dirty++;
 }
 
 // Insert character
@@ -138,10 +158,24 @@ void editorRowInsertChar(erow *row, int at, int c) {
   row->chars[at] = c;
   // Update row
   editorUpdateRow(row);
+  // Update dirtiness
+  E.dirty++;
+}
+
+// Delete character
+void editorRowDelChar(erow *row, int at) {
+  if (at < 0 || at >= row->size)
+    return;
+  memmove(&row->chars[at], &row->chars[at + 1], row->size - at);
+  row->size--;
+  editorUpdateRow(row);
+  // Set dirty to true
+  E.dirty++;
 }
 
 /* Editor Functions */
 
+// Insert character
 void editorInsertChar(int c) {
   if (E.cy == E.numrows) {
     editorAppendRow("", 0);
@@ -150,7 +184,37 @@ void editorInsertChar(int c) {
   E.cx++;
 }
 
+// Append row
+void editorRowAppendString(erow *row, char *s, size_t len) {
+  row->chars = realloc(row->chars, row->size + len + 1);
+  memcpy(&row->chars[row->size], s, len);
+  row->size += len;
+  row->chars[row->size] = '\0';
+  editorUpdateRow(row);
+  E.dirty++;
+}
+
+// Delete character
+void editorDelChar() {
+  if (E.cy == E.numrows)
+    return;
+  if (E.cx == 0 && E.cy == 0)
+    return;
+
+  erow *row = &E.row[E.cy];
+  if (E.cx > 0) {
+    editorRowDelChar(row, E.cx - 1);
+    E.cx--;
+  } else {
+    E.cx = E.row[E.cy - 1].size;
+    editorRowAppendString(&E.row[E.cy - 1], row->chars, row->size);
+    editorDelRow(E.cy);
+    E.cy--;
+  }
+}
+
 /* Terminal */
+
 // Fail handling
 void die(const char *s) {
   // TODO: Refactor to editorRefreshScreen later
@@ -243,6 +307,8 @@ int editorReadKey() {
           return HOME_KEY;
         case 'F':
           return END_KEY;
+        case 'P':
+          return DEL_KEY;
         }
       }
     } else if (seq[0] == 'O') {
@@ -358,6 +424,8 @@ void editorOpen(char *filename) {
   free(line);
   // Closing file stream
   fclose(fp);
+  // Set dirtiness to false
+  E.dirty = 0;
 }
 
 // Save file changes to disk
@@ -374,6 +442,7 @@ void editorSave() {
       if (write(fd, buf, len) == len) {
         close(fd);
         free(buf);
+        E.dirty = 0;
         editorSetStatusMessage("%d bytes writen to disk", len);
         return;
       }
@@ -480,9 +549,10 @@ void editorDrawStatusBar(struct abuf *ab) {
   // Invert colors and make text bold for status bar
   abAppend(ab, "\x1b[1;7m", 6);
   char status[80], rstatus[80];
-  // File Name and Lines Count on the left side
-  int len = snprintf(status, sizeof(status), "%.20s - %d lines",
-                     E.filename ? E.filename : "[ No Name ]", E.numrows);
+  // File Name, Lines Count and Dirtiness on the left side
+  int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
+                     E.filename ? E.filename : "[ No Name ]", E.numrows,
+                     E.dirty ? "(modified)" : "");
   // Line:LinesCount on the right side
   int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cy + 1, E.numrows);
   if (len > E.screencols)
@@ -595,6 +665,9 @@ void editorMoveCursor(int key) {
 
 // Handling keypress
 void editorProcessKeypress() {
+  // How many times CTRL-Q is needed to be pressed to quit
+  static int quit_times = HELIS_QUIT_TIMES;
+
   int c = editorReadKey();
 
   // Handle Enter
@@ -603,7 +676,14 @@ void editorProcessKeypress() {
     break;
 
   case CTRL_KEY('q'):
-    // TODO: Refactor to editorRefreshScreen later
+    // If file is modifeid, warn user at quit
+    if (E.dirty && quit_times > 0) {
+      editorSetStatusMessage("WARNING!!! File has unsaved changes. "
+                             "Press Ctrl-Q %d more times to quit.",
+                             quit_times);
+      quit_times--;
+      return;
+    }
     write(STDOUT_FILENO, "\x1b[2J", 4);
     write(STDOUT_FILENO, "\x1b[1;1H", 6);
     exit(0);
@@ -623,10 +703,13 @@ void editorProcessKeypress() {
       E.cx = E.row[E.cy].size;
     break;
 
-    // Handle misc keys
+    // Handle keys for deletion
   case BACKSPACE:
   case CTRL_KEY('h'):
   case DEL_KEY:
+    if (c == DEL_KEY)
+      editorMoveCursor(ARROW_RIGHT);
+    editorDelChar();
     break;
 
   // Handle PageUP and PageDown
@@ -660,6 +743,8 @@ void editorProcessKeypress() {
     editorInsertChar(c);
     break;
   }
+
+  quit_times = HELIS_QUIT_TIMES;
 }
 
 /* Init */
@@ -672,6 +757,7 @@ void initEditor() {
   E.numrows = 0;
   E.coloff = 0;
   E.row = NULL;
+  E.dirty = 0;
   E.filename = NULL;
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
