@@ -840,9 +840,11 @@ void clearAndExit() {
 
 // TODO: rewrite to own function
 void editorCmdPromptCallback(char *query, int key) {
-  if (*query == 'q' && key == '\r') {
+
+  if ((strcmp(query, "quit") == 0 || strcmp(query, "q") == 0) && key == '\r') {
     clearAndExit();
-  } else if (*query == 'w' && key == '\r') {
+  } else if ((strcmp(query, "write") == 0 || strcmp(query, "w") == 0) &&
+             key == '\r') {
     editorSave();
   }
 }
