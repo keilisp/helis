@@ -299,6 +299,7 @@ void enableRawMode() {
 int editorReadKey() {
   int nread;
   char c;
+
   while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
     if (nread == -1 && errno != EAGAIN)
       die("read");
@@ -828,6 +829,24 @@ void editorMoveCursor(int key) {
   }
 }
 
+/* Exit */
+void clearAndExit() {
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[1;1H", 6);
+  exit(0);
+}
+
+/* Cmd mode */
+
+// TODO: rewrite to own function
+void editorCmdPromptCallback(char *query, int key) {
+  if (*query == 'q' && key == '\r') {
+    clearAndExit();
+  } else if (*query == 'w' && key == '\r') {
+    editorSave();
+  }
+}
+
 // Handle keypress in normal mode
 void editorProcessNormalKeypress(int c) {
   // How many times CTRL-Q is needed to be pressed to quit
@@ -839,7 +858,7 @@ void editorProcessNormalKeypress(int c) {
     editorMoveCursor(ARROW_DOWN);
     break;
 
-  case CTRL_KEY('q'):
+  case 'Q':
     // If file is modifeid, warn user at quit
     if (E.dirty && quit_times > 0) {
       editorSetStatusMessage("WARNING!!! File has unsaved changes. "
@@ -848,9 +867,6 @@ void editorProcessNormalKeypress(int c) {
       quit_times--;
       return;
     }
-    write(STDOUT_FILENO, "\x1b[2J", 4);
-    write(STDOUT_FILENO, "\x1b[1;1H", 6);
-    exit(0);
     break;
 
     // Goto Insert mode on 'i'
@@ -859,7 +875,7 @@ void editorProcessNormalKeypress(int c) {
     break;
 
   // Save with CTRL-S
-  case CTRL_KEY('s'):
+  case 'S':
     editorSave();
     break;
 
@@ -873,7 +889,7 @@ void editorProcessNormalKeypress(int c) {
     break;
 
     // CTRL-F to "Find"
-  case CTRL_KEY('f'):
+  case '/':
     editorFind();
     break;
 
@@ -900,6 +916,16 @@ void editorProcessNormalKeypress(int c) {
     while (times--)
       editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
   } break;
+
+  // Handle x to delete char
+  case 'x':
+    editorDelChar();
+    break;
+
+  // Handle : to goto cmd mode
+  case ':':
+    editorPrompt("Enter something: %s", editorCmdPromptCallback);
+    break;
 
   // Handle hjkl and Arrows
   case ARROW_LEFT:
