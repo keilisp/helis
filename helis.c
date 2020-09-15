@@ -34,8 +34,13 @@ enum editorKey {
   HOME_KEY,
   END_KEY,
   PAGE_UP,
-  PAGE_DOWN
+  PAGE_DOWN,
 };
+
+/* Data */
+
+// Editor modes
+enum editorMode { Normal, Visual, Insert, Cmd };
 
 // Row of text
 typedef struct erow {
@@ -45,7 +50,6 @@ typedef struct erow {
   char *render;
 } erow;
 
-/* Data */
 // Editor config
 struct editorConfig {
   int cx, cy;                  // Cursor coords
@@ -61,6 +65,7 @@ struct editorConfig {
   char statusmsg[80];          // Status message
   time_t statusmsg_time;       // Timestamp for status message
   struct termios orig_termios; // Terminal attributes
+  enum editorMode mode;        // Editor mode
 };
 
 struct editorConfig E;
@@ -357,16 +362,6 @@ int editorReadKey() {
     }
     return '\x1b';
   } else {
-    /* switch (c) { */
-    /* case 'k': */
-    /*   return ARROW_UP; */
-    /* case 'j': */
-    /*   return ARROW_DOWN; */
-    /* case 'l': */
-    /*   return ARROW_RIGHT; */
-    /* case 'h': */
-    /*   return ARROW_LEFT; */
-    /* } */
     return c;
   }
 }
@@ -729,6 +724,20 @@ void editorSetStatusMessage(const char *fmt, ...) {
   E.statusmsg_time = time(NULL);
 }
 
+/* Editor Modes */
+
+// Enter the normal mode
+void editorEnableNormalMode() {
+  E.mode = Normal;
+  write(STDOUT_FILENO, "\033[1 q", 5);
+}
+
+// Enter insert mode
+void editorEnableInsertMode() {
+  E.mode = Insert;
+  write(STDOUT_FILENO, "\033[5 q", 5);
+}
+
 /* Input */
 
 // Prompt for user
@@ -781,16 +790,19 @@ void editorMoveCursor(int key) {
   erow *row = (E.cy >= E.numrows) ? NULL : &E.row[E.cy];
   switch (key) {
   case ARROW_UP:
+  case 'k':
     if (E.cy != 0) {
       E.cy--;
     }
     break;
   case ARROW_DOWN:
+  case 'j':
     if (E.cy < E.numrows) {
       E.cy++;
     }
     break;
   case ARROW_LEFT:
+  case 'h':
     if (E.cx != 0) {
       E.cx--;
     } else if (E.cy > 0) {
@@ -799,6 +811,7 @@ void editorMoveCursor(int key) {
     }
     break;
   case ARROW_RIGHT:
+  case 'l':
     if (row && E.cx < row->size) {
       E.cx++;
     } else if (row && E.cx == row->size) {
@@ -815,17 +828,15 @@ void editorMoveCursor(int key) {
   }
 }
 
-// Handling keypress
-void editorProcessKeypress() {
+// Handle keypress in normal mode
+void editorProcessNormalKeypress(int c) {
   // How many times CTRL-Q is needed to be pressed to quit
   static int quit_times = HELIS_QUIT_TIMES;
-
-  int c = editorReadKey();
 
   // Handle Enter
   switch (c) {
   case '\r':
-    editorInsertNewline();
+    editorMoveCursor(ARROW_DOWN);
     break;
 
   case CTRL_KEY('q'):
@@ -842,7 +853,12 @@ void editorProcessKeypress() {
     exit(0);
     break;
 
-    // Save with CTRL-S
+    // Goto Insert mode on 'i'
+  case 'i':
+    editorEnableInsertMode();
+    break;
+
+  // Save with CTRL-S
   case CTRL_KEY('s'):
     editorSave();
     break;
@@ -861,6 +877,57 @@ void editorProcessKeypress() {
     editorFind();
     break;
 
+    // Handle keys for deletion
+  case BACKSPACE:
+  case CTRL_KEY('h'):
+    editorMoveCursor(ARROW_LEFT);
+    break;
+  case DEL_KEY:
+    editorMoveCursor(ARROW_RIGHT);
+    break;
+
+  // Handle PageUP and PageDown
+  case PAGE_UP:
+  case PAGE_DOWN: {
+    if (c == PAGE_UP) {
+      E.cy = E.rowoff;
+    } else {
+      E.cy = E.rowoff + E.screenrows - 1;
+      if (E.cy > E.numrows)
+        E.cy = E.numrows;
+    }
+    int times = E.screenrows;
+    while (times--)
+      editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+  } break;
+
+  // Handle hjkl and Arrows
+  case ARROW_LEFT:
+  case ARROW_DOWN:
+  case ARROW_UP:
+  case ARROW_RIGHT:
+  case 'h':
+  case 'j':
+  case 'k':
+  case 'l':
+    editorMoveCursor(c);
+    break;
+
+  // Goto Normal mode on 'ESC'
+  case CTRL_KEY('l'):
+  case '\x1b':
+    editorEnableNormalMode();
+    break;
+
+  default:
+    break;
+  }
+
+  quit_times = HELIS_QUIT_TIMES;
+}
+// Handle keypress in insert mode
+void editorProcessInsertKeypress(int c) {
+  switch (c) {
     // Handle keys for deletion
   case BACKSPACE:
   case CTRL_KEY('h'):
@@ -885,24 +952,53 @@ void editorProcessKeypress() {
       editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
   } break;
 
-    // Handle hjkl and Arrows
-  case ARROW_LEFT:
-  case ARROW_DOWN:
-  case ARROW_UP:
-  case ARROW_RIGHT:
-    editorMoveCursor(c);
+    // Handle Home and End
+  case HOME_KEY:
+    E.cx = 0;
+    break;
+  case END_KEY:
+    if (E.cy < E.numrows)
+      E.cx = E.row[E.cy].size;
     break;
 
+    // Insert newline on 'Enter'
+  case '\r':
+    editorInsertNewline();
+    break;
+
+    // Goto Normal mode on 'ESC'
   case CTRL_KEY('l'):
   case '\x1b':
+    editorEnableNormalMode();
     break;
 
   default:
     editorInsertChar(c);
-    break;
   }
+}
+// TODO:
+// Handle keypress in visual mode
+// Handle keypress in cmd mode
 
-  quit_times = HELIS_QUIT_TIMES;
+// Handling keypress
+void editorProcessKeypress() {
+  int c = editorReadKey();
+
+  switch (E.mode) {
+  case Normal:
+    editorProcessNormalKeypress(c);
+    break;
+  case Insert:
+    editorProcessInsertKeypress(c);
+    break;
+    // TODO:
+    /* case Visual: */
+    /*   editorProcessVisualKeypress(); */
+    /*   break; */
+    /* case Cmd: */
+    /*   editorProcessCmdKeypress(); */
+    /*   break; */
+  }
 }
 
 /* Init */
@@ -920,6 +1016,9 @@ void initEditor() {
   E.filename = NULL;
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
+  E.mode = Normal;
+
+  editorEnableNormalMode();
 
   if (getWindowSize(&E.screenrows, &E.screencols) == -1)
     die("getWindowSize");
