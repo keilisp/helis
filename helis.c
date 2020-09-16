@@ -41,6 +41,7 @@ enum editorKey {
 
 // Editor modes
 enum editorMode { Normal, Visual, Insert, Cmd };
+char *editorModes[] = {"Normal", "Visual", "Insert", "Cmd"};
 
 // Row of text
 typedef struct erow {
@@ -656,8 +657,9 @@ void editorDrawStatusBar(struct abuf *ab) {
   int len = snprintf(status, sizeof(status), "%.20s - %d lines %s",
                      E.filename ? E.filename : "[ No Name ]", E.numrows,
                      E.dirty ? "(modified)" : "");
-  // Line:LinesCount on the right side
-  int rlen = snprintf(rstatus, sizeof(rstatus), "%d:%d", E.cy + 1, E.numrows);
+  // Mode and Line:LinesCount on the right side
+  int rlen = snprintf(rstatus, sizeof(rstatus), "[%s]  %d:%d",
+                      editorModes[E.mode], E.cy + 1, E.numrows);
   if (len > E.screencols)
     len = E.screencols;
   abAppend(ab, status, len);
@@ -838,14 +840,23 @@ void clearAndExit() {
 
 /* Cmd mode */
 
-// TODO: rewrite to own function
-void editorCmdPromptCallback(char *query, int key) {
+void editorCmdPrompt() {
+  E.mode = Cmd;
+  char *query = editorPrompt("Cmd: %s", NULL);
+  // If ESC was pressed query return NULL
+  if (!query) {
+    editorEnableNormalMode();
+    return;
+  }
 
-  if ((strcmp(query, "quit") == 0 || strcmp(query, "q") == 0) && key == '\r') {
+  // Checking for variants
+  if (strcmp(query, "quit") == 0 || strcmp(query, "q") == 0) {
     clearAndExit();
-  } else if ((strcmp(query, "write") == 0 || strcmp(query, "w") == 0) &&
-             key == '\r') {
+  } else if (strcmp(query, "write") == 0 || strcmp(query, "w") == 0) {
     editorSave();
+    editorEnableNormalMode();
+  } else {
+    editorEnableNormalMode();
   }
 }
 
@@ -864,11 +875,12 @@ void editorProcessNormalKeypress(int c) {
     // If file is modifeid, warn user at quit
     if (E.dirty && quit_times > 0) {
       editorSetStatusMessage("WARNING!!! File has unsaved changes. "
-                             "Press Ctrl-Q %d more times to quit.",
+                             "Press Q %d more times to quit.",
                              quit_times);
       quit_times--;
       return;
     }
+    clearAndExit();
     break;
 
     // Goto Insert mode on 'i'
@@ -924,10 +936,11 @@ void editorProcessNormalKeypress(int c) {
     editorDelChar();
     break;
 
-  // Handle : to goto cmd mode
-  case ':':
-    editorPrompt("Enter something: %s", editorCmdPromptCallback);
+    // Handle : to goto cmd mode
+  case ':': {
+    editorCmdPrompt();
     break;
+  }
 
   // Handle hjkl and Arrows
   case ARROW_LEFT:
@@ -1019,7 +1032,7 @@ void editorProcessKeypress() {
   case Insert:
     editorProcessInsertKeypress(c);
     break;
-    // TODO:
+    /* // TODO: */
     /* case Visual: */
     /*   editorProcessVisualKeypress(); */
     /*   break; */
@@ -1061,7 +1074,8 @@ int main(int argc, char *argv[]) {
     editorOpen(argv[1]);
   }
 
-  editorSetStatusMessage("HELP: Ctrl-S = save | CTRL-F = find | CTRL-Q = quit");
+  editorSetStatusMessage(
+      "HELP: S(normal) = save | /(normal) = find | Q(normal) = quit");
 
   while (1) {
     editorRefreshScreen();
