@@ -3,7 +3,6 @@
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
-#include <asm-generic/ioctls.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -37,10 +36,19 @@ enum editorKey {
   PAGE_DOWN,
 };
 
-enum editorHighligh { HL_NORMAL = 0, HL_NUMBER, HL_MATCH };
+enum editorHighlight {
+  HL_NORMAL = 0,
+  HL_COMMENT,
+  HL_KEYWORD1,
+  HL_KEYWORD2,
+  HL_STRING,
+  HL_NUMBER,
+  HL_MATCH
+};
 
 // Highlight flags
 #define HL_HIGHLIGHT_NUMBERS (1 << 0)
+#define HL_HIGHLIGHT_STRINGS (1 << 1)
 
 /* Data */
 
@@ -48,6 +56,8 @@ enum editorHighligh { HL_NORMAL = 0, HL_NUMBER, HL_MATCH };
 struct editorSyntax {
   char *filetype;
   char **filematch;
+  char **keywords;
+  char *singleline_comment_start;
   int flags;
 };
 
@@ -90,10 +100,16 @@ struct editorConfig E;
 
 // Language extensions for highlight
 char *C_HL_extensions[] = {".c", ".h", ".cpp", NULL};
+char *C_HL_keywords[] = {"switch",    "if",      "while",   "for",    "break",
+                         "continue",  "return",  "else",    "struct", "union",
+                         "typedef",   "static",  "enum",    "class",  "case",
+
+                         "int|",      "long|",   "double|", "float|", "char|",
+                         "unsigned|", "signed|", "void|",   NULL};
 
 // Higlight database
 struct editorSyntax HLDB[] = {
-    {"c", C_HL_extensions, HL_HIGHLIGHT_NUMBERS},
+    {"c", C_HL_extensions, C_HL_keywords, "//", HL_HIGHLIGHT_NUMBERS},
 };
 
 // Length of database
@@ -103,6 +119,157 @@ struct editorSyntax HLDB[] = {
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
+
+/* Terminal */
+
+// Fail handling
+void die(const char *s) {
+  // TODO: Refactor to editorRefreshScreen later
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[1;1H", 6);
+  perror(s);
+  exit(1);
+}
+
+// Disabling raw mode at exit to prevent issues
+void disableRawMode() {
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1)
+    die("tcsetattr");
+}
+
+// Getting the atributes and setting flags to make terminal raw
+void enableRawMode() {
+  if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) {
+    die("tcgetattr");
+  }
+
+  atexit(disableRawMode);
+
+  // Flags to make terminal 'true' raw
+  struct termios raw = E.orig_termios;
+  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_cflag |= (CS8);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | IEXTEN | ISIG);
+
+  // Min num of bytes needed before read() can return
+  raw.c_cc[VMIN] = 0;
+  // Max amount of time to wati before read() return
+  raw.c_cc[VTIME] = 1;
+
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
+    die("tcsetattr");
+}
+
+// Reading the key from stdin
+int editorReadKey() {
+  int nread;
+  char c;
+
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN)
+      die("read");
+  }
+
+  if (c == '\x1b') {
+    char seq[3];
+
+    if (read(STDIN_FILENO, &seq[0], 1) != 1)
+      return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1)
+      return '\x1b';
+
+    if (seq[0] == '[') {
+      if (seq[1] >= '0' && seq[1] <= '9') {
+        if (read(STDIN_FILENO, &seq[2], 1) != 1)
+          return '\x1b';
+        if (seq[2] == '~') {
+          switch (seq[1]) {
+          case '1':
+            return HOME_KEY;
+          case '3':
+            return DEL_KEY;
+          case '4':
+            return END_KEY;
+          case '5':
+            return PAGE_UP;
+          case '6':
+            return PAGE_DOWN;
+          case '7':
+            return HOME_KEY;
+          case '8':
+            return END_KEY;
+          }
+        }
+      } else {
+        switch (seq[1]) {
+        case 'A':
+          return ARROW_UP;
+        case 'B':
+          return ARROW_DOWN;
+        case 'C':
+          return ARROW_RIGHT;
+        case 'D':
+          return ARROW_LEFT;
+        case 'H':
+          return HOME_KEY;
+        case 'F':
+          return END_KEY;
+        case 'P':
+          return DEL_KEY;
+        }
+      }
+    } else if (seq[0] == 'O') {
+      switch (seq[1]) {
+      case 'H':
+        return HOME_KEY;
+      case 'F':
+        return END_KEY;
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
+}
+
+// Getting the cursor position
+int getCursorPosition(int *rows, int *cols) {
+  char buf[32];
+  unsigned int i = 0;
+
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4)
+    return -1;
+
+  while (i < sizeof(buf) - 1) {
+    if (read(STDIN_FILENO, &buf[i], 1) != 1)
+      break;
+    if (buf[i] == 'R')
+      break;
+    i++;
+  }
+  buf[i] = '\0';
+  if (buf[0] != '\x1b' || buf[1] != '[')
+    return -1;
+  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2)
+    return -1;
+  return 0;
+}
+
+// Getting the window size
+int getWindowSize(int *rows, int *cols) {
+  struct winsize ws;
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
+      return -1;
+    return getCursorPosition(rows, cols);
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
 
 /* Syntax Highlight */
 
@@ -118,12 +285,49 @@ void editorUpdateSyntax(erow *row) {
   // If no syntax return
   if (E.syntax == NULL)
     return;
+
+  char **keywords = E.syntax->keywords;
+
+  char *scs = E.syntax->singleline_comment_start;
+  int scs_len = scs ? strlen(scs) : 0;
+
   int prev_sep = 1;
+  int in_string = 0;
 
   int i;
   while (i < row->rsize) {
     char c = row->render[i];
     unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
+
+    if (scs_len && !in_string) {
+      if (!strncmp(&row->render[i], scs, scs_len)) {
+        memset(&row->hl[i], HL_COMMENT, row->rsize - i);
+        break;
+      }
+    }
+
+    if (E.syntax->flags & HL_HIGHLIGHT_STRINGS) {
+      if (in_string) {
+        row->hl[i] = HL_STRING;
+        if (c == '\\' && i + 1 < row->rsize) {
+          row->hl[i + 1] = HL_STRING;
+          i += 2;
+          continue;
+        }
+        if (c == in_string)
+          in_string = 0;
+        i++;
+        prev_sep = 1;
+        continue;
+      } else {
+        if (c == '"' || c == '\'') {
+          in_string = c;
+          row->hl[i] = HL_STRING;
+          i++;
+          continue;
+        }
+      }
+    }
 
     if (E.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
       if ((isdigit(c) && (prev_sep || prev_hl == HL_NUMBER)) ||
@@ -135,6 +339,23 @@ void editorUpdateSyntax(erow *row) {
       }
     }
 
+    if (prev_sep) {
+      int j;
+      for (j = 0; keywords[j]; j++) {
+        int klen = strlen(keywords[j]);
+        int kw2 = keywords[j][klen - 1] == '|';
+        if (kw2)
+          klen--;
+
+        if (!strncmp(&row->render[i], keywords[j], klen) &&
+            is_separator(row->render[i + klen])) {
+          memset(&row->hl[i], kw2 ? HL_KEYWORD2 : HL_KEYWORD1, klen);
+          i += klen;
+          break;
+        }
+      }
+    }
+
     prev_sep = is_separator(c);
     i++;
   }
@@ -143,6 +364,14 @@ void editorUpdateSyntax(erow *row) {
 // Syntax to Color
 int editorSyntaxToColor(int hl) {
   switch (hl) {
+  case HL_COMMENT:
+    return 36;
+  case HL_KEYWORD1:
+    return 33;
+  case HL_KEYWORD2:
+    return 32;
+  case HL_STRING:
+    return 35;
   case HL_NUMBER:
     return 31;
   case HL_MATCH:
@@ -362,158 +591,7 @@ void editorDelChar() {
   }
 }
 
-/* Terminal */
-
-// Fail handling
-void die(const char *s) {
-  // TODO: Refactor to editorRefreshScreen later
-  write(STDOUT_FILENO, "\x1b[2J", 4);
-  write(STDOUT_FILENO, "\x1b[1;1H", 6);
-  perror(s);
-  exit(1);
-}
-
-// Disabling raw mode at exit to prevent issues
-void disableRawMode() {
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1)
-    die("tcsetattr");
-}
-
-// Getting the atributes and setting flags to make terminal raw
-void enableRawMode() {
-  if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) {
-    die("tcgetattr");
-  }
-
-  atexit(disableRawMode);
-
-  // Flags to make terminal 'true' raw
-  struct termios raw = E.orig_termios;
-  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-  raw.c_oflag &= ~(OPOST);
-  raw.c_cflag |= (CS8);
-  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | IEXTEN | ISIG);
-
-  // Min num of bytes needed before read() can return
-  raw.c_cc[VMIN] = 0;
-  // Max amount of time to wati before read() return
-  raw.c_cc[VTIME] = 1;
-
-  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
-    die("tcsetattr");
-}
-
-// Reading the key from stdin
-int editorReadKey() {
-  int nread;
-  char c;
-
-  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
-    if (nread == -1 && errno != EAGAIN)
-      die("read");
-  }
-
-  if (c == '\x1b') {
-    char seq[3];
-
-    if (read(STDIN_FILENO, &seq[0], 1) != 1)
-      return '\x1b';
-    if (read(STDIN_FILENO, &seq[1], 1) != 1)
-      return '\x1b';
-
-    if (seq[0] == '[') {
-      if (seq[1] >= '0' && seq[1] <= '9') {
-        if (read(STDIN_FILENO, &seq[2], 1) != 1)
-          return '\x1b';
-        if (seq[2] == '~') {
-          switch (seq[1]) {
-          case '1':
-            return HOME_KEY;
-          case '3':
-            return DEL_KEY;
-          case '4':
-            return END_KEY;
-          case '5':
-            return PAGE_UP;
-          case '6':
-            return PAGE_DOWN;
-          case '7':
-            return HOME_KEY;
-          case '8':
-            return END_KEY;
-          }
-        }
-      } else {
-        switch (seq[1]) {
-        case 'A':
-          return ARROW_UP;
-        case 'B':
-          return ARROW_DOWN;
-        case 'C':
-          return ARROW_RIGHT;
-        case 'D':
-          return ARROW_LEFT;
-        case 'H':
-          return HOME_KEY;
-        case 'F':
-          return END_KEY;
-        case 'P':
-          return DEL_KEY;
-        }
-      }
-    } else if (seq[0] == 'O') {
-      switch (seq[1]) {
-      case 'H':
-        return HOME_KEY;
-      case 'F':
-        return END_KEY;
-      }
-    }
-    return '\x1b';
-  } else {
-    return c;
-  }
-}
-
-// Getting the cursor position
-int getCursorPosition(int *rows, int *cols) {
-  char buf[32];
-  unsigned int i = 0;
-
-  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4)
-    return -1;
-
-  while (i < sizeof(buf) - 1) {
-    if (read(STDIN_FILENO, &buf[i], 1) != 1)
-      break;
-    if (buf[i] == 'R')
-      break;
-    i++;
-  }
-  buf[i] = '\0';
-  if (buf[0] != '\x1b' || buf[1] != '[')
-    return -1;
-  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2)
-    return -1;
-  return 0;
-}
-
-// Getting the window size
-int getWindowSize(int *rows, int *cols) {
-  struct winsize ws;
-
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12)
-      return -1;
-    return getCursorPosition(rows, cols);
-  } else {
-    *cols = ws.ws_col;
-    *rows = ws.ws_row;
-    return 0;
-  }
-}
-
-/* File I/o */
+/* File I/O */
 
 // Convert array of rows to string
 char *editorRowsToString(int *buflen) {
@@ -598,8 +676,8 @@ void editorSave() {
     }
     close(fd);
   }
-  editorSetStatusMessage("Filed ot save: I/o error: %s", strerror(errno));
   free(buf);
+  editorSetStatusMessage("Filed ot save: I/o error: %s", strerror(errno));
 }
 
 /* Find */
@@ -772,7 +850,17 @@ void editorDrawRows(struct abuf *ab) {
       int current_color = -1;
       int j;
       for (j = 0; j < len; j++) {
-        if (hl[j] == HL_NORMAL) {
+        if (iscntrl(c[j])) {
+          char sym = (c[j] <= 26) ? '@' + c[j] : '?';
+          abAppend(ab, "\x1b[7m", 4);
+          abAppend(ab, &sym, 1);
+          abAppend(ab, "\x1b[m", 3);
+          if (current_color != -1) {
+            char buf[16];
+            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", current_color);
+            abAppend(ab, buf, clen);
+          }
+        } else if (hl[j] == HL_NORMAL) {
           if (current_color != -1) {
             abAppend(ab, "\x1b[39m", 5);
             current_color = -1;
