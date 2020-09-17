@@ -37,18 +37,32 @@ enum editorKey {
   PAGE_DOWN,
 };
 
+enum editorHighligh { HL_NORMAL = 0, HL_NUMBER, HL_MATCH };
+
+// Highlight flags
+#define HL_HIGHLIGHT_NUMBERS (1 << 0)
+
 /* Data */
+
+// Syntax
+struct editorSyntax {
+  char *filetype;
+  char **filematch;
+  int flags;
+};
 
 // Editor modes
 enum editorMode { Normal, Visual, Insert, Cmd };
+
 char *editorModes[] = {"Normal", "Visual", "Insert", "Cmd"};
 
 // Row of text
 typedef struct erow {
-  int size;  // Chars size
-  int rsize; // Render size
-  char *chars;
-  char *render;
+  int size;          // Chars size
+  int rsize;         // Render size
+  char *chars;       // Chars in a row(actual)
+  char *render;      // Chars in a row(to render)
+  unsigned char *hl; // Highlight
 } erow;
 
 // Editor config
@@ -65,16 +79,106 @@ struct editorConfig {
   char *filename;              // File Name
   char statusmsg[80];          // Status message
   time_t statusmsg_time;       // Timestamp for status message
+  struct editorSyntax *syntax; // Syntax
   struct termios orig_termios; // Terminal attributes
   enum editorMode mode;        // Editor mode
 };
 
 struct editorConfig E;
 
+/* Filetypes */
+
+// Language extensions for highlight
+char *C_HL_extensions[] = {".c", ".h", ".cpp", NULL};
+
+// Higlight database
+struct editorSyntax HLDB[] = {
+    {"c", C_HL_extensions, HL_HIGHLIGHT_NUMBERS},
+};
+
+// Length of database
+#define HLDB_ENTRIES (sizeof(HLDB) / sizeof(HLDB[0]))
+
 /* Prototypes */
 void editorSetStatusMessage(const char *fmt, ...);
 void editorRefreshScreen();
 char *editorPrompt(char *prompt, void (*callback)(char *, int));
+
+/* Syntax Highlight */
+
+int is_separator(int c) {
+  return isspace(c) || c == '\0' || strchr(",.()+-/*=~%<>[];", c) != NULL;
+}
+
+// Update Highlight
+void editorUpdateSyntax(erow *row) {
+  row->hl = realloc(row->hl, row->rsize);
+  memset(row->hl, HL_NORMAL, row->rsize);
+
+  // If no syntax return
+  if (E.syntax == NULL)
+    return;
+  int prev_sep = 1;
+
+  int i;
+  while (i < row->rsize) {
+    char c = row->render[i];
+    unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
+
+    if (E.syntax->flags & HL_HIGHLIGHT_NUMBERS) {
+      if ((isdigit(c) && (prev_sep || prev_hl == HL_NUMBER)) ||
+          (c == '.' && prev_hl == HL_NUMBER)) {
+        row->hl[i] = HL_NUMBER;
+        i++;
+        prev_sep = 0;
+        continue;
+      }
+    }
+
+    prev_sep = is_separator(c);
+    i++;
+  }
+}
+
+// Syntax to Color
+int editorSyntaxToColor(int hl) {
+  switch (hl) {
+  case HL_NUMBER:
+    return 31;
+  case HL_MATCH:
+    return 34;
+  default:
+    return 37;
+  }
+}
+
+void editorSelectSyntaxHighlight() {
+  E.syntax = NULL;
+  if (E.filename == NULL)
+    return;
+
+  char *ext = strrchr(E.filename, '.');
+
+  for (unsigned int j = 0; j < HLDB_ENTRIES; j++) {
+    struct editorSyntax *s = &HLDB[j];
+    unsigned int i = 0;
+    while (s->filematch[i]) {
+      int is_ext = (s->filematch[i][0] == '.');
+      if ((is_ext && ext && !strcmp(ext, s->filematch[i])) ||
+          (!is_ext && strstr(E.filename, s->filematch[i]))) {
+        E.syntax = s;
+
+        int filerow;
+        for (filerow = 0; filerow < E.numrows; filerow++) {
+          editorUpdateSyntax(&E.row[filerow]);
+        }
+
+        return;
+      }
+      i++;
+    }
+  }
+}
 
 /* Row Functions */
 
@@ -133,6 +237,7 @@ void editorUpdateRow(erow *row) {
 
   row->render[idx] = '\0';
   row->rsize = idx;
+  editorUpdateSyntax(row);
 }
 
 // Insert row
@@ -150,6 +255,7 @@ void editorInsertRow(int at, char *s, size_t len) {
 
   E.row[at].rsize = 0;
   E.row[at].render = NULL;
+  E.row[at].hl = NULL;
   editorUpdateRow(&E.row[at]);
 
   E.numrows++;
@@ -161,6 +267,7 @@ void editorInsertRow(int at, char *s, size_t len) {
 void editorFreeRow(erow *row) {
   free(row->render);
   free(row->chars);
+  free(row->hl);
 }
 
 // Delete row
@@ -438,6 +545,9 @@ void editorOpen(char *filename) {
   // Set File Nam e
   E.filename = strdup(filename);
 
+  // Set highlight
+  editorSelectSyntaxHighlight();
+
   // Open file stream
   FILE *fp = fopen(filename, "r");
   if (!fp)
@@ -469,6 +579,7 @@ void editorSave() {
       editorSetStatusMessage("Save aborted");
       return;
     }
+    editorSelectSyntaxHighlight();
   }
 
   int len;
@@ -498,6 +609,16 @@ void editorFindCallback(char *query, int key) {
   // Search forward and backward
   static int last_match = -1;
   static int direction = 1;
+
+  // Highlight of search
+  static int saved_hl_line;
+  static char *saved_hl = NULL;
+
+  if (saved_hl) {
+    memcpy(E.row[saved_hl_line].hl, saved_hl, E.row[saved_hl_line].rsize);
+    free(saved_hl);
+    saved_hl = NULL;
+  }
 
   if (key == '\r' || key == '\x1b') {
     last_match = -1;
@@ -531,6 +652,11 @@ void editorFindCallback(char *query, int key) {
       E.cy = current;
       E.cx = editorRowRxToCx(row, match - row->render);
       E.rowoff = E.numrows;
+
+      saved_hl_line = current;
+      saved_hl = malloc(row->rsize);
+      memcpy(saved_hl, row->hl, row->rsize);
+      memset(&row->hl[match - row->render], HL_MATCH, strlen(query));
       break;
     }
   }
@@ -640,7 +766,30 @@ void editorDrawRows(struct abuf *ab) {
         len = 0;
       if (len > E.screencols)
         len = E.screencols;
-      abAppend(ab, &E.row[filerow].render[E.coloff], len);
+
+      char *c = &E.row[filerow].render[E.coloff];
+      unsigned char *hl = &E.row[filerow].hl[E.coloff];
+      int current_color = -1;
+      int j;
+      for (j = 0; j < len; j++) {
+        if (hl[j] == HL_NORMAL) {
+          if (current_color != -1) {
+            abAppend(ab, "\x1b[39m", 5);
+            current_color = -1;
+          }
+          abAppend(ab, &c[j], 1);
+        } else {
+          int color = editorSyntaxToColor(hl[j]);
+          if (color != current_color) {
+            current_color = color;
+            char buf[16];
+            int clen = snprintf(buf, sizeof(buf), "\x1b[%dm", color);
+            abAppend(ab, buf, clen);
+          }
+          abAppend(ab, &c[j], 1);
+        }
+      }
+      abAppend(ab, "\x1b[39m", 5);
     }
     // Clear the line when redrawing
     abAppend(ab, "\x1b[K", 3);
@@ -658,8 +807,9 @@ void editorDrawStatusBar(struct abuf *ab) {
                      E.filename ? E.filename : "[ No Name ]", E.numrows,
                      E.dirty ? "(modified)" : "");
   // Mode and Line:LinesCount on the right side
-  int rlen = snprintf(rstatus, sizeof(rstatus), "[%s]  %d:%d",
-                      editorModes[E.mode], E.cy + 1, E.numrows);
+  int rlen = snprintf(
+      rstatus, sizeof(rstatus), "[%s] | %s | %d:%d", editorModes[E.mode],
+      E.syntax ? E.syntax->filetype : "no ft", E.cy + 1, E.numrows);
   if (len > E.screencols)
     len = E.screencols;
   abAppend(ab, status, len);
@@ -832,6 +982,7 @@ void editorMoveCursor(int key) {
 }
 
 /* Exit */
+
 void clearAndExit() {
   write(STDOUT_FILENO, "\x1b[2J", 4);
   write(STDOUT_FILENO, "\x1b[1;1H", 6);
@@ -851,6 +1002,20 @@ void editorCmdPrompt() {
 
   // Checking for variants
   if (strcmp(query, "quit") == 0 || strcmp(query, "q") == 0) {
+
+    // FIXME
+    // How many times :q is needed to be pressed to quit
+    /* static int quit_times = HELIS_QUIT_TIMES; */
+
+    // If file is modifeid, warn user at quit
+    /* if (E.dirty && quit_times > 0) { */
+    /*   editorSetStatusMessage("WARNING!!! File has unsaved changes. " */
+    /*                          "Press :q %d more times to quit.", */
+    /*                          quit_times); */
+    /*   quit_times--; */
+    /* } */
+    /* quit_times = HELIS_QUIT_TIMES; */
+
     clearAndExit();
   } else if (strcmp(query, "write") == 0 || strcmp(query, "w") == 0) {
     editorSave();
@@ -862,8 +1027,6 @@ void editorCmdPrompt() {
 
 // Handle keypress in normal mode
 void editorProcessNormalKeypress(int c) {
-  // How many times CTRL-Q is needed to be pressed to quit
-  static int quit_times = HELIS_QUIT_TIMES;
 
   // Handle Enter
   switch (c) {
@@ -871,26 +1034,9 @@ void editorProcessNormalKeypress(int c) {
     editorMoveCursor(ARROW_DOWN);
     break;
 
-  case 'Q':
-    // If file is modifeid, warn user at quit
-    if (E.dirty && quit_times > 0) {
-      editorSetStatusMessage("WARNING!!! File has unsaved changes. "
-                             "Press Q %d more times to quit.",
-                             quit_times);
-      quit_times--;
-      return;
-    }
-    clearAndExit();
-    break;
-
     // Goto Insert mode on 'i'
   case 'i':
     editorEnableInsertMode();
-    break;
-
-  // Save with CTRL-S
-  case 'S':
-    editorSave();
     break;
 
     // Handle Home and End
@@ -963,8 +1109,6 @@ void editorProcessNormalKeypress(int c) {
   default:
     break;
   }
-
-  quit_times = HELIS_QUIT_TIMES;
 }
 // Handle keypress in insert mode
 void editorProcessInsertKeypress(int c) {
@@ -1058,6 +1202,7 @@ void initEditor() {
   E.statusmsg[0] = '\0';
   E.statusmsg_time = 0;
   E.mode = Normal;
+  E.syntax = NULL;
 
   editorEnableNormalMode();
 
