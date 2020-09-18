@@ -41,36 +41,52 @@ or with file you want to edit
 
 ### Normal Mode
 
-h - move cursor left
-j - move cursor down
-k - move cursor up
-l - move cursor right
+- h - move cursor left
+- j - move cursor down
+- k - move cursor up
+- l - move cursor right
 
-0 - move cursor to the beginning of a line
-\$ - move cursor to the end of a line
+---
 
-PageUp - scroll one page up
-PageDown - scroll one page down
+- 0 - move cursor to the beginning of a line
+- \$ - move cursor to the end of a line
 
-gg - move cursor to the beginning of a file
-G - move cursor to the end of a file
+---
 
-/ - search for a text
-ArrowUp/ArrowRight - go to the next occurrence
-ArrowDown/ArrowLeft - go to the previous occurrence
+- PageUp - scroll one page up
+- PageDown - scroll one page down
 
-x - delete a character under the cursor
+---
 
-: - enable Cmd mode
+- gg - move cursor to the beginning of a file
+- G - move cursor to the end of a file
 
-i - enable Insert mode
-I - move cursor to the beginning of a line and enable Insert mode
-a - move cursor right and enable Insert mode
-A - move cursor to the end of a line and enable Insert mode
-o - create newline down and enable Insert mode
-O - create newline up and enable Insert mode
+---
 
-### Cmd mode
+- / - search for a text
+- ArrowUp/ArrowRight - go to the next occurrence
+- ArrowDown/ArrowLeft - go to the previous occurrence
 
-q/quit - exit from _helis_
-w/write - write changes to the disk
+---
+
+- x - delete a character under the cursor
+
+---
+
+- : - enable Cmd mode
+
+---
+
+- i - enable Insert mode
+- I - move cursor to the beginning of a line and enable Insert mode
+- a - move cursor right and enable Insert mode
+- A - move cursor to the end of a line and enable Insert mode
+- o - create newline down and enable Insert mode
+- O - create newline up and enable Insert mode
+
+- ### Cmd mode
+
+---
+
+- q/quit - exit from _helis_
+- w/write - write changes to the disk
