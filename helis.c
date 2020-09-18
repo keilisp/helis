@@ -33,7 +33,11 @@ enum editorKey {
   HOME_KEY,
   END_KEY,
   PAGE_UP,
-  PAGE_DOWN
+  PAGE_DOWN,
+};
+
+enum editorSequnces {
+  GG_SEQ,
 };
 
 enum editorHighlight {
@@ -170,27 +174,26 @@ void enableRawMode() {
 // Reading the key from stdin
 int editorReadKey() {
   int nread;
-  char c;
+  char seq[6];
 
-  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+  while ((nread = read(STDIN_FILENO, &seq[0], 1)) != 1) {
     if (nread == -1 && errno != EAGAIN)
       die("read");
   }
 
-  if (c == '\x1b') {
-    char seq[3];
+  if (seq[0] == '\x1b') {
 
-    if (read(STDIN_FILENO, &seq[0], 1) != 1)
-      return '\x1b';
     if (read(STDIN_FILENO, &seq[1], 1) != 1)
       return '\x1b';
+    if (read(STDIN_FILENO, &seq[2], 1) != 1)
+      return '\x1b';
 
-    if (seq[0] == '[') {
-      if (seq[1] >= '0' && seq[1] <= '9') {
-        if (read(STDIN_FILENO, &seq[2], 1) != 1)
+    if (seq[1] == '[') {
+      if (seq[2] >= '0' && seq[2] <= '9') {
+        if (read(STDIN_FILENO, &seq[3], 1) != 1)
           return '\x1b';
-        if (seq[2] == '~') {
-          switch (seq[1]) {
+        if (seq[3] == '~') {
+          switch (seq[2]) {
           case '1':
             return HOME_KEY;
           case '3':
@@ -208,7 +211,7 @@ int editorReadKey() {
           }
         }
       } else {
-        switch (seq[1]) {
+        switch (seq[2]) {
         case 'A':
           return ARROW_UP;
         case 'B':
@@ -225,8 +228,8 @@ int editorReadKey() {
           return DEL_KEY;
         }
       }
-    } else if (seq[0] == 'O') {
-      switch (seq[1]) {
+    } else if (seq[1] == 'O') {
+      switch (seq[2]) {
       case 'H':
         return HOME_KEY;
       case 'F':
@@ -234,8 +237,17 @@ int editorReadKey() {
       }
     }
     return '\x1b';
+  } else if (seq[0] == 'g') {
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) {
+      return 'g';
+    } else if (seq[1] == 'g') {
+      return GG_SEQ;
+    } else {
+      return seq[0];
+    }
+
   } else {
-    return c;
+    return seq[0];
   }
 }
 
@@ -1226,6 +1238,10 @@ void editorProcessNormalKeypress(int c) {
     editorMoveCursor(ARROW_RIGHT);
     break;
 
+  case 'G':
+    E.cy = E.numrows - 1;
+    break;
+
   case PAGE_UP:
   case PAGE_DOWN: {
     if (c == PAGE_UP) {
@@ -1270,6 +1286,8 @@ void editorProcessNormalKeypress(int c) {
     editorEnableNormalMode();
     break;
 
+  case GG_SEQ:
+    E.cy = 0;
   default:
     break;
   }
@@ -1394,7 +1412,7 @@ int main(int argc, char *argv[]) {
   }
 
   editorSetStatusMessage(
-      "HELP: S(normal) = save | /(normal) = find | Q(normal) = quit");
+      "HELP: w|write(cmd) = save | /(normal) = find | q|quit(cmd) = quit");
 
   while (1) {
     editorRefreshScreen();
