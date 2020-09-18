@@ -84,7 +84,7 @@ or with file you want to edit
 - o - create newline down and enable Insert mode
 - O - create newline up and enable Insert mode
 
-- ### Cmd mode
+### Cmd mode
 
 ---
 
