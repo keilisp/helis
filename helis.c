@@ -33,12 +33,13 @@ enum editorKey {
   HOME_KEY,
   END_KEY,
   PAGE_UP,
-  PAGE_DOWN,
+  PAGE_DOWN
 };
 
 enum editorHighlight {
   HL_NORMAL = 0,
   HL_COMMENT,
+  HL_MLCOMMENT,
   HL_KEYWORD1,
   HL_KEYWORD2,
   HL_STRING,
@@ -58,6 +59,8 @@ struct editorSyntax {
   char **filematch;
   char **keywords;
   char *singleline_comment_start;
+  char *multiline_comment_start;
+  char *multiline_comment_end;
   int flags;
 };
 
@@ -68,11 +71,13 @@ char *editorModes[] = {"Normal", "Visual", "Insert", "Cmd"};
 
 // Row of text
 typedef struct erow {
+  int idx;
   int size;          // Chars size
   int rsize;         // Render size
   char *chars;       // Chars in a row(actual)
   char *render;      // Chars in a row(to render)
   unsigned char *hl; // Highlight
+  int hl_open_comment;
 } erow;
 
 // Editor config
@@ -109,7 +114,8 @@ char *C_HL_keywords[] = {"switch",    "if",      "while",   "for",    "break",
 
 // Higlight database
 struct editorSyntax HLDB[] = {
-    {"c", C_HL_extensions, C_HL_keywords, "//", HL_HIGHLIGHT_NUMBERS},
+    {"c", C_HL_extensions, C_HL_keywords, "//", "/*", "*/",
+     HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
 };
 
 // Length of database
@@ -150,7 +156,7 @@ void enableRawMode() {
   raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
   raw.c_oflag &= ~(OPOST);
   raw.c_cflag |= (CS8);
-  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | IEXTEN | ISIG);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
 
   // Min num of bytes needed before read() can return
   raw.c_cc[VMIN] = 0;
@@ -289,20 +295,47 @@ void editorUpdateSyntax(erow *row) {
   char **keywords = E.syntax->keywords;
 
   char *scs = E.syntax->singleline_comment_start;
+  char *mcs = E.syntax->multiline_comment_start;
+  char *mce = E.syntax->multiline_comment_end;
+
   int scs_len = scs ? strlen(scs) : 0;
+  int mcs_len = mcs ? strlen(mcs) : 0;
+  int mce_len = mce ? strlen(mce) : 0;
 
   int prev_sep = 1;
   int in_string = 0;
+  int in_comment = (row->idx > 0 && E.row[row->idx - 1].hl_open_comment);
 
-  int i;
+  int i = 0;
   while (i < row->rsize) {
     char c = row->render[i];
     unsigned char prev_hl = (i > 0) ? row->hl[i - 1] : HL_NORMAL;
 
-    if (scs_len && !in_string) {
+    if (scs_len && !in_string && !in_comment) {
       if (!strncmp(&row->render[i], scs, scs_len)) {
         memset(&row->hl[i], HL_COMMENT, row->rsize - i);
         break;
+      }
+    }
+
+    if (mcs_len && mce_len && !in_string) {
+      if (in_comment) {
+        row->hl[i] = HL_MLCOMMENT;
+        if (!strncmp(&row->render[i], mce, mce_len)) {
+          memset(&row->hl[i], HL_MLCOMMENT, mce_len);
+          i += mce_len;
+          in_comment = 0;
+          prev_sep = 1;
+          continue;
+        } else {
+          i++;
+          continue;
+        }
+      } else if (!strncmp(&row->render[i], mcs, mcs_len)) {
+        memset(&row->hl[i], HL_MLCOMMENT, mcs_len);
+        i += mcs_len;
+        in_comment = 1;
+        continue;
       }
     }
 
@@ -354,17 +387,27 @@ void editorUpdateSyntax(erow *row) {
           break;
         }
       }
+      if (keywords[j] != NULL) {
+        prev_sep = 0;
+        continue;
+      }
     }
 
     prev_sep = is_separator(c);
     i++;
   }
+
+  int changed = (row->hl_open_comment != in_comment);
+  row->hl_open_comment = in_comment;
+  if (changed && row->idx + 1 < E.numrows)
+    editorUpdateSyntax(&E.row[row->idx + 1]);
 }
 
 // Syntax to Color
 int editorSyntaxToColor(int hl) {
   switch (hl) {
   case HL_COMMENT:
+  case HL_MLCOMMENT:
     return 36;
   case HL_KEYWORD1:
     return 33;
@@ -386,23 +429,21 @@ void editorSelectSyntaxHighlight() {
   if (E.filename == NULL)
     return;
 
-  char *ext = strrchr(E.filename, '.');
-
   for (unsigned int j = 0; j < HLDB_ENTRIES; j++) {
     struct editorSyntax *s = &HLDB[j];
     unsigned int i = 0;
     while (s->filematch[i]) {
-      int is_ext = (s->filematch[i][0] == '.');
-      if ((is_ext && ext && !strcmp(ext, s->filematch[i])) ||
-          (!is_ext && strstr(E.filename, s->filematch[i]))) {
-        E.syntax = s;
-
-        int filerow;
-        for (filerow = 0; filerow < E.numrows; filerow++) {
-          editorUpdateSyntax(&E.row[filerow]);
+      char *p = strstr(E.filename, s->filematch[i]);
+      if (p != NULL) {
+        int patlen = strlen(s->filematch[i]);
+        if (s->filematch[i][0] != '.' || p[patlen] == '\0') {
+          E.syntax = s;
+          int filerow;
+          for (filerow = 0; filerow < E.numrows; filerow++) {
+            editorUpdateSyntax(&E.row[filerow]);
+          }
+          return;
         }
-
-        return;
       }
       i++;
     }
@@ -475,7 +516,11 @@ void editorInsertRow(int at, char *s, size_t len) {
     return;
 
   E.row = realloc(E.row, sizeof(erow) * (E.numrows + 1));
-  memmove(&E.row[at | 1], &E.row[at], sizeof(erow) * (E.numrows - at));
+  memmove(&E.row[at + 1], &E.row[at], sizeof(erow) * (E.numrows - at));
+  for (int j = at + 1; j <= E.numrows; j++)
+    E.row[j].idx++;
+
+  E.row[at].idx = at;
 
   E.row[at].size = len;
   E.row[at].chars = malloc(len + 1);
@@ -485,6 +530,7 @@ void editorInsertRow(int at, char *s, size_t len) {
   E.row[at].rsize = 0;
   E.row[at].render = NULL;
   E.row[at].hl = NULL;
+  E.row[at].hl_open_comment = 0;
   editorUpdateRow(&E.row[at]);
 
   E.numrows++;
@@ -505,6 +551,8 @@ void editorDelRow(int at) {
     return;
   editorFreeRow(&E.row[at]);
   memmove(&E.row[at], &E.row[at + 1], sizeof(erow) * (E.numrows - at - 1));
+  for (int j = at; j < E.numrows - 1; j++)
+    E.row[j].idx--;
   E.numrows--;
   E.dirty++;
 }
@@ -1112,7 +1160,6 @@ void editorCmdPrompt() {
     editorEnableNormalMode();
   }
 }
-
 // Handle keypress in normal mode
 void editorProcessNormalKeypress(int c) {
 
@@ -1122,26 +1169,55 @@ void editorProcessNormalKeypress(int c) {
     editorMoveCursor(ARROW_DOWN);
     break;
 
-    // Goto Insert mode on 'i'
-  case 'i':
-    editorEnableInsertMode();
-    break;
-
-    // Handle Home and End
-  case HOME_KEY:
-    E.cx = 0;
-    break;
-  case END_KEY:
-    if (E.cy < E.numrows)
-      E.cx = E.row[E.cy].size;
-    break;
-
-    // CTRL-F to "Find"
+    // / to "Find"
   case '/':
     editorFind();
     break;
 
-    // Handle keys for deletion
+    // Basic insert keys
+  case 'i':
+    editorEnableInsertMode();
+    break;
+  case 'I':
+    E.cx = 0;
+    editorEnableInsertMode();
+    break;
+  case 'a':
+    editorMoveCursor(ARROW_RIGHT);
+    editorEnableInsertMode();
+    break;
+  case 'A':
+    if (E.cy < E.numrows)
+      E.cx = E.row[E.cy].size;
+    editorEnableInsertMode();
+    break;
+  case 'o':
+    if (E.cy < E.numrows)
+      E.cx = E.row[E.cy].size;
+    editorEnableInsertMode();
+    editorInsertNewline();
+    break;
+  case 'O':
+    editorMoveCursor(ARROW_UP);
+    if (E.cy < E.numrows)
+      E.cx = E.row[E.cy].size;
+    editorEnableInsertMode();
+    editorInsertNewline();
+    break;
+
+    // Basic movement keys
+  case '0':
+  case HOME_KEY:
+    E.cx = 0;
+    break;
+  case '$':
+  case END_KEY:
+    if (E.cy < E.numrows)
+      E.cx = E.row[E.cy].size;
+    break;
+  case ' ':
+    editorMoveCursor(ARROW_LEFT);
+    break;
   case BACKSPACE:
   case CTRL_KEY('h'):
     editorMoveCursor(ARROW_LEFT);
@@ -1150,7 +1226,6 @@ void editorProcessNormalKeypress(int c) {
     editorMoveCursor(ARROW_RIGHT);
     break;
 
-  // Handle PageUP and PageDown
   case PAGE_UP:
   case PAGE_DOWN: {
     if (c == PAGE_UP) {
@@ -1167,6 +1242,7 @@ void editorProcessNormalKeypress(int c) {
 
   // Handle x to delete char
   case 'x':
+    editorMoveCursor(ARROW_RIGHT);
     editorDelChar();
     break;
 
@@ -1201,6 +1277,11 @@ void editorProcessNormalKeypress(int c) {
 // Handle keypress in insert mode
 void editorProcessInsertKeypress(int c) {
   switch (c) {
+    // Insert newline on 'Enter'
+  case '\r':
+    editorInsertNewline();
+    break;
+
     // Handle keys for deletion
   case BACKSPACE:
   case CTRL_KEY('h'):
@@ -1234,15 +1315,17 @@ void editorProcessInsertKeypress(int c) {
       E.cx = E.row[E.cy].size;
     break;
 
-    // Insert newline on 'Enter'
-  case '\r':
-    editorInsertNewline();
-    break;
-
     // Goto Normal mode on 'ESC'
   case CTRL_KEY('l'):
   case '\x1b':
     editorEnableNormalMode();
+    break;
+
+  case ARROW_LEFT:
+  case ARROW_DOWN:
+  case ARROW_UP:
+  case ARROW_RIGHT:
+    editorMoveCursor(c);
     break;
 
   default:
@@ -1252,6 +1335,9 @@ void editorProcessInsertKeypress(int c) {
 // TODO:
 // Handle keypress in visual mode
 // Handle keypress in cmd mode
+// Make own func:
+/* if (E.cy < E.numrows) */
+/*   E.cx = E.row[E.cy].size; */
 
 // Handling keypress
 void editorProcessKeypress() {
