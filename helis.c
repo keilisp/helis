@@ -680,7 +680,7 @@ char *editorRowsToString(int *buflen) {
 // Open file in the editor
 void editorOpen(char *filename) {
   free(E.filename);
-  // Set File Nam e
+  // Set File Name
   E.filename = strdup(filename);
 
   // Set highlight
@@ -1412,7 +1412,7 @@ int main(int argc, char *argv[]) {
   }
 
   editorSetStatusMessage(
-      "HELP: w|write(cmd) = save | /(normal) = find | q|quit(cmd) = quit");
+      "HELP: w/write(cmd) = save | '/'(normal) = find | q/quit(cmd) = quit");
 
   while (1) {
     editorRefreshScreen();
