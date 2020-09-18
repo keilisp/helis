@@ -2,7 +2,7 @@
 
 # Description
 
-Simple code editor with basic vim-like bindings and syntax highlighting
+Simple terminal code editor with basic vim-like bindings and syntax highlighting
 
 # Preview
 
